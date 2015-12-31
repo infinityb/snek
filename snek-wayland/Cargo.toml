@@ -8,6 +8,7 @@ byteorder = "0.4.2"
 tempfile = "1.1.3"
 wayland-client = "0.5.5"
 mmap = "0.1.1"
+time = "*"
 
 [dependencies.snek_engine]
 path = "../snek-engine"
