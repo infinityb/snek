@@ -145,7 +145,6 @@ impl Direction {
     }
 }
 
-
 pub struct GameState {
     arena_size: Area,
     snake: Snake,
@@ -228,13 +227,19 @@ impl GameState {
             let y = self.arena_size.y_off + y_range.ind_sample(&mut rng);
             let food_pos = (x, y);
 
+            println!("trying to place food: {:?}", food_pos);
+            let mut food_position_ok = true;
+
             for pos in self.snake.positions() {
                 if pos == food_pos {
-                    continue;
+                    food_position_ok = false;
+                    break;
                 }
             }
 
-            self.objects.insert(Position(x, y), GameObject::Food);
+            if food_position_ok {
+                self.objects.insert(Position(x, y), GameObject::Food);
+            }
         }
 
         if !hit_food {
