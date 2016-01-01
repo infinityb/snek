@@ -1,3 +1,5 @@
+#![feature(raw)]
+
 extern crate byteorder;
 extern crate tempfile;
 #[macro_use]
@@ -39,7 +41,38 @@ wayland_env!(WaylandEnv,
     seat: WlSeat
 );
 
-fn flush_keyboard_buf(evt_iter: &mut EventIterator) -> Option<Direction> {
+#[derive(Copy, Clone)]
+enum KeyboardEvent {
+    Up,
+    Down,
+    Left,
+    Right,
+    Space,
+}
+
+impl KeyboardEvent {
+    pub fn priority(&self) -> u16 {
+        match *self {
+            KeyboardEvent::Up => 1,
+            KeyboardEvent::Down => 1,
+            KeyboardEvent::Left => 1,
+            KeyboardEvent::Right => 1,
+            KeyboardEvent::Space => 2,
+        }
+    }
+}
+
+fn replace_state(evt: &mut Option<KeyboardEvent>, new_event: KeyboardEvent) {
+    if let Some(prev_evt) = *evt {
+        if prev_evt.priority() <= new_event.priority() {
+            *evt = Some(new_event);
+        }
+    } else {
+        *evt = Some(new_event);
+    }
+}
+
+fn flush_keyboard_buf(evt_iter: &mut EventIterator) -> Option<KeyboardEvent> {
     use wayland_client::Event;
     use wayland_client::wayland::WaylandProtocolEvent as WPE;
     use wayland_client::wayland::seat::WlKeyboardEvent as KE;
@@ -50,16 +83,19 @@ fn flush_keyboard_buf(evt_iter: &mut EventIterator) -> Option<Direction> {
         if let Some(Event::Wayland(event)) = evt_iter.next() {
             match event {
                 WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 103, Pressed)) => {
-                    out = Some(Direction::North);
+                    replace_state(&mut out, KeyboardEvent::Up);
                 },
                 WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 105, Pressed)) => {
-                    out = Some(Direction::West);
+                    replace_state(&mut out, KeyboardEvent::Left);
                 },
                 WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 106, Pressed)) => {
-                    out = Some(Direction::East);
+                    replace_state(&mut out, KeyboardEvent::Right);
                 },
                 WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 108, Pressed)) => {
-                    out = Some(Direction::South);
+                    replace_state(&mut out, KeyboardEvent::Down);
+                },
+                WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 57, Pressed)) => {
+                    replace_state(&mut out, KeyboardEvent::Space);
                 },
                 evt @ _ => {
                     println!("{:?}", evt)
@@ -115,6 +151,7 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
     let tick_duration = TimeDuration::nanoseconds(TICK_NANOS);
     let mut next_frame = SteadyTime::now();
     let mut next_tick = SteadyTime::now();
+    let mut paused = false;
 
     // let game_painter = GamePainter::new();
     let mut game_state = GameState::new(64, 64);
@@ -147,10 +184,27 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
         }
 
         if emit_tick {
-            let mut direction = flush_keyboard_buf(evt_iter);
+            let keyboard_event = flush_keyboard_buf(evt_iter);
+
+            let mut direction = None;
+            match keyboard_event {
+                Some(KeyboardEvent::Up) => direction = Some(Direction::North),
+                Some(KeyboardEvent::Down) => direction = Some(Direction::South),
+                Some(KeyboardEvent::Left) => direction = Some(Direction::West),
+                Some(KeyboardEvent::Right) => direction = Some(Direction::East),
+                Some(KeyboardEvent::Space) => {
+                    println!("paused!");
+                    paused = !paused;
+                },
+                None => (),
+            };
+
             if let Some(dir) = direction {
                 game_state.set_user_direction(dir);
             }
+        }
+
+        if emit_tick && !paused {
             if let Err(err) = game_state.tick() {
                 println!("Game Over: {:?}", err);
                 break;
@@ -159,7 +213,7 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
 
         if emit_frame {
             let mut buffer = painter.create_buffer();
-            draw_gradient(&mut buffer);
+            draw_background(&mut buffer);
 
             {
                 let mut painter = SnakePainter::new(&mut buffer);
@@ -170,6 +224,10 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
                 for (pos, object) in game_state.object_iter() {
                     painter.paint(pos, object);
                 }
+            }
+
+            if paused {
+                draw_paused_screen(&mut buffer);
             }
 
             surface.attach(Some(&buffer.wl_buffer), 0, 0);
@@ -185,28 +243,85 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
     }
 }
 
-fn draw_gradient(buffer: &mut Buffer) {
-    for pixel in buffer.memory.iter_mut() {
-        *pixel = 0xFF000000;
+fn u8_slice_to_u32_slice(inp: &[u8]) -> &[u32] {
+    use std::raw::Slice;
+    use std::mem::transmute;
+
+    let mut slice: Slice<u8> = unsafe { transmute(inp) };
+    assert_eq!(slice.len % 4, 0);
+    slice.len = slice.len / 4;
+    unsafe { transmute(slice) }
+}
+
+fn draw_background(buffer: &mut Buffer) {
+    let background = u8_slice_to_u32_slice(include_bytes!("../background.bin"));
+    assert_eq!(background.len(), buffer.memory.len());
+
+    for (from_px, to_px) in background.iter().zip(buffer.memory.iter_mut()) {
+        *to_px = *from_px;
     }
-    // for x in 0..buffer.width {
-    //     let mut red_val = (0x66 * x / buffer.width) as u32;
-    //     if 0xFF < red_val {
-    //         red_val = 0xFF;
-    //     }
-    //     for y in 0..buffer.height {
-    //         let mut green_val = (0x66 * y / buffer.height) as u32;
-    //         if 0xFF < green_val {
-    //             green_val = 0xFF;
-    //         }
+}
 
-    //         let mut out: u32 = 0xFF000000;
-    //         out |= red_val << 16;
-    //         out |= green_val << 8;
+fn draw_paused_screen(buffer: &mut Buffer) {
+    let background = u8_slice_to_u32_slice(include_bytes!("../pause.bin"));
+    porter_duff_unary(&mut buffer.memory, background, PorterDuff::Over);
+}
 
-    //         buffer.memory[y * buffer.width + x] = out;
-    //     }
-    // }
+#[derive(Debug, Eq, PartialEq)]
+enum PorterDuff {
+    Over,
+}
+
+impl PorterDuff {
+    pub fn operate(&self, left: u32, right: u32) -> u32 {
+        match *self {
+            PorterDuff::Over => {
+                let (aa, ar, ag, ab) = channels(left);
+                let (ba, br, bg, bb) = channels(right);
+
+                let a = aa + ba * (1.0 - aa);
+                let r = (ar * aa + br * ba * (1.0 - aa)) / a;
+                let g = (ag * aa + bg * ba * (1.0 - aa)) / a;
+                let b = (ab * aa + bb * ba * (1.0 - aa)) / a;
+
+                let mut out = 0x00000000;
+                out |= (clamp(0.0, 255.0, 255.0 * a.floor()) as u32) << 24;
+                out |= (clamp(0.0, 255.0, 255.0 * r.floor()) as u32) << 16;
+                out |= (clamp(0.0, 255.0, 255.0 * g.floor()) as u32) << 8;
+                out |= (clamp(0.0, 255.0, 255.0 * b.floor()) as u32) << 0;
+
+                out
+            }
+        }
+    }
+}
+
+fn clamp(minimum: f64, maximum: f64, value: f64) -> f64 {
+    if value < minimum {
+        return minimum;
+    }
+    if maximum < value {
+        return maximum;
+    }
+    return value;
+}
+
+fn channels(val: u32) -> (f64, f64, f64, f64) {
+    (
+        ((val >> 24 & 0xFF) as f64 / 255.0),
+        ((val >> 16 & 0xFF) as f64 / 255.0),
+        ((val >>  8 & 0xFF) as f64 / 255.0),
+        ((val >>  0 & 0xFF) as f64 / 255.0),
+    )
+}
+
+fn porter_duff_unary(onto: &mut [u32], from: &[u32], operation: PorterDuff) {
+    // other operations unimplemented
+    assert_eq!(operation, PorterDuff::Over);
+    for (from_px, to_px) in from.iter().zip(onto.iter_mut()) {
+        // *to_px = operation.operate(*from_px, *to_px);
+        *to_px = operation.operate(*to_px, *from_px);
+    }
 }
 
 struct GamePainter {
