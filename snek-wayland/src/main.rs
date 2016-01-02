@@ -167,12 +167,19 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
     const TICK_NANOS: i64 = 100_000_000;
 
     let background = get_background_surface();
+    let food = get_food_surface();
+    let snake = get_snake_surface();
+
     let frame_duration = TimeDuration::nanoseconds(FRAME_NANOS);
     let tick_duration = TimeDuration::nanoseconds(TICK_NANOS);
     let mut next_frame = SteadyTime::now();
     let mut next_tick = SteadyTime::now();
     let mut paused = false;
 
+    let bg_width = background.width() as isize;
+    let bg_height = background.height() as isize;
+    let bg_viewport_width: isize = 512;
+    let bg_viewport_height: isize = 512;
     let mut bg_xoff: isize = 0;
     let mut bg_xoff_dir: isize = 4;
     let mut bg_yoff: isize = 0;
@@ -228,8 +235,6 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
             }
         }
 
-
-
         if emit_tick && !paused {
             if let Err(err) = game_state.tick() {
                 println!("Game Over: {:?}", err);
@@ -238,13 +243,20 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
         }
 
         if emit_frame {
-            if !paused || true {
+            if !paused {
                 bg_xoff += bg_xoff_dir;
                 bg_yoff += bg_yoff_dir;
-                if bg_xoff == 512 || bg_xoff == 0 {
+
+                let bg_terminal_xoff = bg_width - bg_viewport_width;
+                let bg_terminal_yoff = bg_height - bg_viewport_height;
+
+                bg_xoff = clamp(bg_xoff, 0, bg_terminal_xoff);
+                bg_yoff = clamp(bg_yoff, 0, bg_terminal_yoff);
+
+                if bg_xoff == 0 || bg_xoff == bg_terminal_xoff {
                     bg_xoff_dir = -bg_xoff_dir;
                 }
-                if bg_yoff == 512 || bg_yoff == 0 {
+                if bg_yoff == 0 || bg_yoff == bg_terminal_yoff {
                     bg_yoff_dir = -bg_yoff_dir;
                 }
             }
@@ -254,12 +266,12 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
 
             {
                 let mut painter = SnakePainter::new(&mut buffer);
-                painter.paint(game_state.get_snake());
+                painter.paint(&snake, game_state.get_snake());
             }
             {
                 let mut painter = ObjectPainter::new(&mut buffer);
                 for (pos, object) in game_state.object_iter() {
-                    painter.paint(pos, object);
+                    painter.paint(&food, pos, object);
                 }
             }
 
@@ -290,22 +302,58 @@ fn u8_slice_to_u32_slice(inp: &[u8]) -> &[u32] {
     unsafe { transmute(slice) }
 }
 
+fn moving<T>(thing: T) -> T {
+    thing
+}
+
 fn get_background_surface() -> Surface<ColorARGB<u8>> {
     let background_px = u8_slice_to_u32_slice(include_bytes!("../background.bin"));
     let mut background: Surface<ColorARGB<u8>> = Surface::new(1024, 1024, ColorARGB::black());
 
     let mut bg_px_iter = background_px.iter();
 
-    for (px, idx) in bg_px_iter.zip(0..512*512) {
-        let (y, x) = (idx / 512 * 2, idx % 512 * 2);
-        background[(x, y)] = ColorARGB::from_packed_argb(*px);
-        background[(x, y+1)] = ColorARGB::from_packed_argb(*px);
-        background[(x+1, y)] = ColorARGB::from_packed_argb(*px);
-        background[(x+1, y+1)] = ColorARGB::from_packed_argb(*px);
+    for (px, idx) in bg_px_iter.zip(0..) {
+        let (y, x) = ((idx / 512) * 2, (idx % 512) * 2);
+        let new_color = ColorARGB::from_packed_argb(*px);
+        background[(x, y)] = new_color;
+        background[(x, y+1)] = new_color;
+        background[(x+1, y)] = new_color;
+        background[(x+1, y+1)] = new_color;
     }
 
+    let food = get_food_surface();
+    let food_tile = food.divide().next().unwrap();
+    let mut background = moving(background);
     background
 }
+
+fn load_raw_sprite(surf: &mut Surface<ColorARGB<u8>>, raw: &[u32]) {
+    for xoff0 in 0..16 {
+        for yoff in 0..8 {
+            for xoff1 in 0..8 {
+                let xoff = xoff0 * 8 + xoff1;
+                surf[(xoff, yoff)] = ColorARGB::from_packed_argb(raw[yoff * 8 + xoff1]);
+            }
+        }
+    }
+}
+
+fn get_food_surface() -> Surface<ColorARGB<u8>> {
+    let raw = u8_slice_to_u32_slice(include_bytes!("../food.bin"));
+
+    let mut surf: Surface<ColorARGB<u8>> = Surface::new(128, 8, ColorARGB::black());
+    load_raw_sprite(&mut surf, raw);
+    surf
+}
+
+fn get_snake_surface() -> Surface<ColorARGB<u8>> {
+    let raw = u8_slice_to_u32_slice(include_bytes!("../snake.bin"));
+
+    let mut surf: Surface<ColorARGB<u8>> = Surface::new(128, 8, ColorARGB::black());
+    load_raw_sprite(&mut surf, raw);
+    surf
+}
+
 
 fn draw_background(background: &Surface<ColorARGB<u8>>, xoff: usize, yoff: usize, buffer: &mut Buffer) {
     let mut buffer_mem = buffer.memory.iter_mut();
@@ -483,7 +531,7 @@ impl<'a, 'b: 'a> SnakePainter<'a, 'b> {
         SnakePainter { buffer: buffer }
     }
 
-    pub fn paint(&mut self, snake: &Snake) {
+    pub fn paint(&mut self, paint: &Surface<ColorARGB<u8>>, snake: &Snake) {
         use std::cmp::{min, max};
 
         for part in SnakeJointer::new(snake.positions()) {
@@ -517,19 +565,31 @@ impl<'a, 'b: 'a> ObjectPainter<'a, 'b> {
         ObjectPainter { buffer: buffer }
     }
 
-    pub fn paint(&mut self, (x, y): (usize, usize), obj: &GameObject) {
-        let color = match *obj {
-            GameObject::Food => 0xFFFF0000,
-            GameObject::Wall => 0xFFFF00FF,
-        };
-        let x_start = x * 8 + 1;
-        let x_end = (x + 1) * 8 - 1;
-        let y_start = y * 8 + 1;
-        let y_end = (y + 1) * 8 - 1;
-        for x_p in x_start..x_end {
-            for y_p in y_start..y_end {
-                self.buffer.set_color((x_p, y_p), color);
-            }
+    pub fn paint(&mut self, paint: &Surface<ColorARGB<u8>>, (x, y): (usize, usize), obj: &GameObject) {
+        let x_start = x * 8;
+        let y_start = y * 8;
+
+        let mut buf = [0; 1024];
+        for (pixel, buf) in paint.pixels_raw().iter().zip(buf.iter_mut()) {
+            *buf = pixel.packed();
+        }
+
+        for yoff in 0..8 {
+            let row = &mut self.buffer.memory[(yoff + y_start) * 512..];
+            let segment = &mut row[x_start..][..8];
+            unsafe {
+                porter_duff_inplace_src(segment, &buf[yoff * 128..][..8], PorterDuffMode::Over)
+            }.unwrap();
         }
     }
+}
+
+fn clamp<T: PartialOrd>(value: T, min_value: T, max_value: T) -> T {
+    if max_value < value {
+        return max_value;
+    }
+    if value < min_value {
+        return min_value;
+    }
+    value
 }
