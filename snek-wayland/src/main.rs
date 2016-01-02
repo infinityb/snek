@@ -7,6 +7,7 @@ extern crate wayland_client;
 extern crate snek_engine;
 extern crate mmap;
 extern crate time;
+extern crate surface;
 
 use byteorder::{WriteBytesExt, NativeEndian};
 
@@ -23,6 +24,15 @@ use wayland_client::wayland::shm::{WlShm, WlShmPool, WlShmFormat, WlBuffer};
 use wayland_client::wayland::data_device::WlDataDeviceManager;
 use wayland_client::wayland::seat::WlSeat;
 use wayland_client::EventIterator;
+
+use surface::Surface;
+use surface::colorspace::ColorARGB;
+use surface::compositing::{
+    porter_duff,
+    porter_duff_inplace_dst,
+    porter_duff_inplace_src,
+    Mode as PorterDuffMode,
+};
 
 use mmap::{MapOption, MemoryMap};
 
@@ -48,6 +58,7 @@ enum KeyboardEvent {
     Left,
     Right,
     Space,
+    G, H,
 }
 
 impl KeyboardEvent {
@@ -58,6 +69,8 @@ impl KeyboardEvent {
             KeyboardEvent::Left => 1,
             KeyboardEvent::Right => 1,
             KeyboardEvent::Space => 2,
+            KeyboardEvent::G => 0,
+            KeyboardEvent::H => 0,
         }
     }
 }
@@ -96,6 +109,12 @@ fn flush_keyboard_buf(evt_iter: &mut EventIterator) -> Option<KeyboardEvent> {
                 },
                 WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 57, Pressed)) => {
                     replace_state(&mut out, KeyboardEvent::Space);
+                },
+                WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 34, Pressed)) => {
+                    replace_state(&mut out, KeyboardEvent::G);
+                },
+                WPE::WlKeyboard(_proxy_id, KE::Key(ser, ts, 35, Pressed)) => {
+                    replace_state(&mut out, KeyboardEvent::H);
                 },
                 evt @ _ => {
                     println!("{:?}", evt)
@@ -147,11 +166,17 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
     const FRAME_NANOS: i64 = 2 * 16_666_666;
     const TICK_NANOS: i64 = 100_000_000;
 
+    let background = get_background_surface();
     let frame_duration = TimeDuration::nanoseconds(FRAME_NANOS);
     let tick_duration = TimeDuration::nanoseconds(TICK_NANOS);
     let mut next_frame = SteadyTime::now();
     let mut next_tick = SteadyTime::now();
     let mut paused = false;
+
+    let mut bg_xoff: isize = 0;
+    let mut bg_xoff_dir: isize = 4;
+    let mut bg_yoff: isize = 0;
+    let mut bg_yoff_dir: isize = 1;
 
     // let game_painter = GamePainter::new();
     let mut game_state = GameState::new(64, 64);
@@ -192,10 +217,9 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
                 Some(KeyboardEvent::Down) => direction = Some(Direction::South),
                 Some(KeyboardEvent::Left) => direction = Some(Direction::West),
                 Some(KeyboardEvent::Right) => direction = Some(Direction::East),
-                Some(KeyboardEvent::Space) => {
-                    println!("paused!");
-                    paused = !paused;
-                },
+                Some(KeyboardEvent::Space) => paused = !paused,
+                Some(KeyboardEvent::G) => game_state.set_force_grow(true),
+                Some(KeyboardEvent::H) => game_state.set_force_grow(false),
                 None => (),
             };
 
@@ -203,6 +227,8 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
                 game_state.set_user_direction(dir);
             }
         }
+
+
 
         if emit_tick && !paused {
             if let Err(err) = game_state.tick() {
@@ -212,8 +238,19 @@ fn run_game(display: &mut WlDisplay, surface: &WlSurface, painter: &mut GamePain
         }
 
         if emit_frame {
+            if !paused || true {
+                bg_xoff += bg_xoff_dir;
+                bg_yoff += bg_yoff_dir;
+                if bg_xoff == 512 || bg_xoff == 0 {
+                    bg_xoff_dir = -bg_xoff_dir;
+                }
+                if bg_yoff == 512 || bg_yoff == 0 {
+                    bg_yoff_dir = -bg_yoff_dir;
+                }
+            }
+
             let mut buffer = painter.create_buffer();
-            draw_background(&mut buffer);
+            draw_background(&background, bg_xoff as usize, bg_yoff as usize, &mut buffer);
 
             {
                 let mut painter = SnakePainter::new(&mut buffer);
@@ -253,75 +290,39 @@ fn u8_slice_to_u32_slice(inp: &[u8]) -> &[u32] {
     unsafe { transmute(slice) }
 }
 
-fn draw_background(buffer: &mut Buffer) {
-    let background = u8_slice_to_u32_slice(include_bytes!("../background.bin"));
-    assert_eq!(background.len(), buffer.memory.len());
+fn get_background_surface() -> Surface<ColorARGB<u8>> {
+    let background_px = u8_slice_to_u32_slice(include_bytes!("../background.bin"));
+    let mut background: Surface<ColorARGB<u8>> = Surface::new(1024, 1024, ColorARGB::black());
 
-    for (from_px, to_px) in background.iter().zip(buffer.memory.iter_mut()) {
-        *to_px = *from_px;
+    let mut bg_px_iter = background_px.iter();
+
+    for (px, idx) in bg_px_iter.zip(0..512*512) {
+        let (y, x) = (idx / 512 * 2, idx % 512 * 2);
+        background[(x, y)] = ColorARGB::from_packed_argb(*px);
+        background[(x, y+1)] = ColorARGB::from_packed_argb(*px);
+        background[(x+1, y)] = ColorARGB::from_packed_argb(*px);
+        background[(x+1, y+1)] = ColorARGB::from_packed_argb(*px);
     }
+
+    background
 }
 
-fn draw_paused_screen(buffer: &mut Buffer) {
-    let background = u8_slice_to_u32_slice(include_bytes!("../pause.bin"));
-    porter_duff_unary(&mut buffer.memory, background, PorterDuff::Over);
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum PorterDuff {
-    Over,
-}
-
-impl PorterDuff {
-    pub fn operate(&self, left: u32, right: u32) -> u32 {
-        match *self {
-            PorterDuff::Over => {
-                let (aa, ar, ag, ab) = channels(left);
-                let (ba, br, bg, bb) = channels(right);
-
-                let a = aa + ba * (1.0 - aa);
-                let r = (ar * aa + br * ba * (1.0 - aa)) / a;
-                let g = (ag * aa + bg * ba * (1.0 - aa)) / a;
-                let b = (ab * aa + bb * ba * (1.0 - aa)) / a;
-
-                let mut out = 0x00000000;
-                out |= (clamp(0.0, 255.0, 255.0 * a.floor()) as u32) << 24;
-                out |= (clamp(0.0, 255.0, 255.0 * r.floor()) as u32) << 16;
-                out |= (clamp(0.0, 255.0, 255.0 * g.floor()) as u32) << 8;
-                out |= (clamp(0.0, 255.0, 255.0 * b.floor()) as u32) << 0;
-
-                out
-            }
+fn draw_background(background: &Surface<ColorARGB<u8>>, xoff: usize, yoff: usize, buffer: &mut Buffer) {
+    let mut buffer_mem = buffer.memory.iter_mut();
+    for y in 0..512 {
+        for x in 0..512 {
+            let to_px = buffer_mem.next().unwrap();
+            *to_px = background[(x+xoff, y+yoff)].packed();
         }
     }
 }
 
-fn clamp(minimum: f64, maximum: f64, value: f64) -> f64 {
-    if value < minimum {
-        return minimum;
-    }
-    if maximum < value {
-        return maximum;
-    }
-    return value;
-}
+fn draw_paused_screen(buffer: &mut Buffer) {
+    let pause = u8_slice_to_u32_slice(include_bytes!("../pause.bin"));
+    unsafe {
+        porter_duff_inplace_src(&mut buffer.memory, pause, PorterDuffMode::Over)
+    }.unwrap();
 
-fn channels(val: u32) -> (f64, f64, f64, f64) {
-    (
-        ((val >> 24 & 0xFF) as f64 / 255.0),
-        ((val >> 16 & 0xFF) as f64 / 255.0),
-        ((val >>  8 & 0xFF) as f64 / 255.0),
-        ((val >>  0 & 0xFF) as f64 / 255.0),
-    )
-}
-
-fn porter_duff_unary(onto: &mut [u32], from: &[u32], operation: PorterDuff) {
-    // other operations unimplemented
-    assert_eq!(operation, PorterDuff::Over);
-    for (from_px, to_px) in from.iter().zip(onto.iter_mut()) {
-        // *to_px = operation.operate(*from_px, *to_px);
-        *to_px = operation.operate(*to_px, *from_px);
-    }
 }
 
 struct GamePainter {

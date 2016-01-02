@@ -574,6 +574,9 @@ dependencies = [
 [[package]]
 name = "snek_engine"
 version = "0.1.0"
+dependencies = [
+ "rand 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "tempdir"

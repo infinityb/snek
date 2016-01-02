@@ -1,0 +1,11 @@
+[package]
+
+name = "surface"
+version = "0.0.1"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+
+[dependencies]
+num = "0.1.24"
+
+[dependencies.netpbm]
+git = "git://github.com/infinityb/netpbm"

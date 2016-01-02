@@ -12,3 +12,6 @@ time = "*"
 
 [dependencies.snek_engine]
 path = "../snek-engine"
+
+[dependencies.surface]
+path = "../surface"

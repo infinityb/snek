@@ -1,0 +1,11 @@
+[package]
+name = "surface_capi"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+
+[lib]
+name = "surface_capi"
+crate-type = ["dylib"]
+
+[dependencies.surface]
+path = ".."
